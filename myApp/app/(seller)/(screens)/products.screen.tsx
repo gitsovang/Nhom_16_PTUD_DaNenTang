@@ -7,7 +7,6 @@ import {
   TextInput,
   StyleSheet,
   Modal,
-  Image,
   ScrollView,
   ActivityIndicator,
   Alert,
@@ -16,6 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { format } from 'date-fns';
 import * as ImagePicker from 'expo-image-picker';
+import {Image} from 'expo-image'
 import axios from 'axios';
 import { Picker } from '@react-native-picker/picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -405,7 +405,7 @@ export default function ProductsScreen() {
 
       <FlatList
         data={paginatedProducts}
-        keyExtractor={(item) => item.id}
+        keyExtractor={(item) => item.id.toString()} 
         renderItem={({ item }) => {
           const statusConfig = {
             waiting_for_approve: { text: 'Chờ duyệt', color: '#f97316', bg: '#fff7ed' },
@@ -426,17 +426,23 @@ export default function ProductsScreen() {
               </View>
 
               <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                {item.images.length > 0 ? (
-                  item.images.map((uri, i) => (
-                    <Image key={i} source={{ uri }} style={styles.productImage} resizeMode="cover" />
-                  ))
-                ) : (
-                  <View style={styles.noImage}>
-                    <Ionicons name="image-outline" size={40} color="#d1d5db" />
-                  </View>
-                )}
-              </ScrollView>
-
+              {item.images.length > 0 ? (
+    item.images.map((uri, i) => (
+      <Image
+        key={uri + i}   
+        source={{ uri }}
+        style={styles.productImage}
+        contentFit="cover"
+        transition={200}
+        cachePolicy="memory-disk"
+         />
+        ))
+       ) : (
+     <View style={styles.noImage}>
+      <Ionicons name="image-outline" size={40} color="#d1d5db" />
+    </View>
+  )}
+      </ScrollView>
               <Text style={styles.productName} numberOfLines={2}>
                 {item.name}
               </Text>

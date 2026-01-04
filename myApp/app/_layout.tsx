@@ -21,7 +21,7 @@ export default function RootLayout() {
         <Stack.Screen name="(seller)/sellertab" options={{ headerShown: false }} />
         <Stack.Screen name="(auth)/login/index" options={{ headerShown: false }} />
         <Stack.Screen name="(auth)/register/index" options={{ headerShown: false }} />
-        <Stack.Screen name="(buyer)/(details)/product-detail" options={{ title: 'Product Detail' }} />
+        <Stack.Screen name="(buyer)/(details)/product-detail" options={{ title: 'Chi tiết sản phẩm' }} />
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
       </Stack>

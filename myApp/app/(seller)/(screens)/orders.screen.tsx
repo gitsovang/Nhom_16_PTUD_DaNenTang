@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { format, subDays, parseISO, isValid } from 'date-fns';
+import { format, subDays, isValid } from 'date-fns';
 import DateTimePickerModal from 'react-native-modal-datetime-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Picker } from '@react-native-picker/picker';
@@ -24,10 +24,12 @@ const ORDERS_PER_PAGE = 10;
 
 type OrderStatus = 'pending' | 'confirmed' | 'shipping' | 'completed' | 'cancelled';
 type OrderItemDetail = {
+  order_item_id: number;
   product_name: string;
   quantity: number;
   unit_price: number;
   subtotal: number;
+  status: OrderStatus;
 };
 type OrderDetail = {
   id: string;
@@ -35,7 +37,6 @@ type OrderDetail = {
   customer_name: string;
   customer_phone: string;
   total_amount: string;
-  status: OrderStatus;
   created_at: Date;
   items: OrderItemDetail[];
 };
@@ -113,7 +114,9 @@ export default function OrdersScreen() {
       if (!response.ok) throw new Error();
       const data = await response.json();
       setRawOrders(data);
-      const grouped: { [key: string]: OrderDetail } = {};
+
+      const grouped: { [key: string]: OrderDetail & { total_amount: number } } = {};
+
       data.forEach((item: any) => {
         const orderId = item.order_id.toString();
         if (!grouped[orderId]) {
@@ -122,20 +125,28 @@ export default function OrdersScreen() {
             order_code: item.order_code,
             customer_name: item.buyer?.full_name || 'Khách hàng',
             customer_phone: item.buyer?.phone || '---',
-            total_amount: `₫${Number(item.seller_subtotal).toLocaleString('vi-VN')}`,
-            status: item.status as OrderStatus,
+            total_amount: 0, 
             created_at: parseVnDate(item.created_at),
             items: [],
           };
         }
         grouped[orderId].items.push({
+          order_item_id: item.order_item_id,
           product_name: item.product.name,
           quantity: item.product.quantity,
           unit_price: item.product.price,
-          subtotal: item.product.quantity * item.product.price,
+          subtotal: item.seller_subtotal,
+          status: item.status,
         });
+        grouped[orderId].total_amount += Number(item.seller_subtotal);
       });
-      setOrders(Object.values(grouped));
+
+      const finalOrders = Object.values(grouped).map(o => ({
+        ...o,
+        total_amount: `₫${o.total_amount.toLocaleString('vi-VN')}`,
+      }));
+
+      setOrders(finalOrders);
     } catch {
       Alert.alert('Lỗi', 'Không thể tải danh sách đơn hàng');
     } finally {
@@ -153,21 +164,49 @@ export default function OrdersScreen() {
     fetchOrders();
   }, [fetchOrders]);
 
-  const updateOrderStatus = async (orderId: string, newStatus: OrderStatus) => {
-    if (!sellerId) return;
-    try {
-      const res = await fetch(`${API_BASE}/seller/${sellerId}/order/${orderId}/status`, {
+  const updateOrderItemStatus = async (orderItemId: number, newStatus: OrderStatus) => {
+  if (!sellerId) return;
+
+  try {
+    const res = await fetch(
+      `${API_BASE}/seller/${sellerId}/order-item/${orderItemId}/status`,
+      {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus }),
-      });
-      if (!res.ok) throw new Error();
-      setOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: newStatus } : o));
-      setSelectedOrder(prev => prev && prev.id === orderId ? { ...prev, status: newStatus } : prev);
-    } catch {
-      Alert.alert('Lỗi', 'Không thể cập nhật trạng thái');
-    }
-  };
+      }
+    );
+    if (!res.ok) throw new Error();
+
+
+    setOrders(prevOrders =>
+      prevOrders.map(order => {
+        const hasItem = order.items.some(i => i.order_item_id === orderItemId);
+        if (!hasItem) return order;
+        return {
+          ...order,
+          items: order.items.map(i =>
+            i.order_item_id === orderItemId ? { ...i, status: newStatus } : i
+          ),
+        };
+      })
+    );
+
+    setSelectedOrder(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        items: prev.items.map(i =>
+          i.order_item_id === orderItemId ? { ...i, status: newStatus } : i
+        ),
+      };
+    });
+
+  } catch {
+    Alert.alert('Lỗi', 'Không thể cập nhật trạng thái');
+  }
+};
+
 
   const filteredOrders = useMemo(() => {
     let result = [...orders];
@@ -180,7 +219,7 @@ export default function OrdersScreen() {
       );
     }
     if (selectedStatus !== 'all') {
-      result = result.filter(o => o.status === selectedStatus);
+      result = result.filter(o => o.items.some(i => i.status === selectedStatus));
     }
     return result.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
   }, [orders, searchQuery, selectedStatus]);
@@ -201,9 +240,8 @@ export default function OrdersScreen() {
         setToDate(today);
         break;
       case 'yesterday':
-        const yesterday = subDays(today, 1);
-        setFromDate(yesterday);
-        setToDate(yesterday);
+        setFromDate(subDays(today, 1));
+        setToDate(subDays(today, 1));
         break;
       case 'last7':
         setFromDate(subDays(today, 7));
@@ -227,6 +265,7 @@ export default function OrdersScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
+      {/* HEADER */}
       <View style={styles.header}>
         <Text style={styles.title}>Đơn hàng</Text>
         <View style={styles.headerCount}>
@@ -235,6 +274,7 @@ export default function OrdersScreen() {
         </View>
       </View>
 
+      {/* FILTERS */}
       <View style={styles.filtersContainer}>
         <View style={styles.searchContainer}>
           <Ionicons name="search-outline" size={20} color="#9ca3af" />
@@ -294,6 +334,7 @@ export default function OrdersScreen() {
         </View>
       </View>
 
+      {/* ORDERS LIST */}
       <FlatList
         data={paginatedOrders}
         keyExtractor={item => item.id}
@@ -307,7 +348,7 @@ export default function OrdersScreen() {
           </View>
         }
         renderItem={({ item }) => {
-          const statusItem = statusConfig[item.status];
+          const statusItem = statusConfig[item.items[0].status]; // Lấy tạm trạng thái đầu tiên cho hiển thị card
           return (
             <TouchableOpacity
               style={styles.orderCard}
@@ -336,6 +377,7 @@ export default function OrdersScreen() {
         }}
       />
 
+      {/* ORDER DETAIL MODAL */}
       <Modal
         visible={!!selectedOrder}
         transparent
@@ -370,52 +412,27 @@ export default function OrdersScreen() {
                   </View>
                   <View style={styles.detailSection}>
                     <Text style={styles.detailLabel}>Sản phẩm</Text>
-                    {selectedOrder.items.map((it, index) => (
-                      <View key={index} style={styles.productItem}>
-                        <Text style={styles.productName}>{it.product_name}</Text>
-                        <Text style={styles.productInfo}>
-                          Số lượng: {it.quantity} × ₫{Number(it.unit_price).toLocaleString('vi-VN')}
-                        </Text>
-                        <Text style={styles.productSubtotal}>
-                          Subtotal: ₫{Number(it.subtotal).toLocaleString('vi-VN')}
-                        </Text>
+                    {selectedOrder.items.map(item => (
+                      <View key={item.order_item_id} style={styles.productItem}>
+                        <Text style={styles.productName}>{item.product_name}</Text>
+                        <Text style={styles.productInfo}>Số lượng: {item.quantity} × {item.unit_price.toLocaleString()}₫</Text>
+                        <Text style={styles.productSubtotal}>Thành tiền: {item.subtotal.toLocaleString()}₫</Text>
+                        <Picker
+                          selectedValue={item.status}
+                          onValueChange={(value) =>
+                            updateOrderItemStatus(item.order_item_id, value as OrderStatus)
+                          }
+                        >
+                          {Object.entries(statusConfig).map(([k, v]) => (
+                            <Picker.Item key={k} label={v.text} value={k} />
+                          ))}
+                        </Picker>
                       </View>
                     ))}
                   </View>
                   <View style={styles.detailSection}>
                     <Text style={styles.detailLabel}>Tổng tiền</Text>
                     <Text style={styles.detailTotal}>{selectedOrder.total_amount}</Text>
-                  </View>
-                  <View style={styles.detailSection}>
-                    <Text style={styles.detailLabel}>Trạng thái</Text>
-                    <View style={styles.statusDropdownContainer}>
-                      <Picker
-                        selectedValue={selectedOrder.status}
-                        onValueChange={(itemValue) => {
-                          if (itemValue !== selectedOrder.status) {
-                            updateOrderStatus(selectedOrder.id, itemValue as OrderStatus);
-                          }
-                        }}
-                        style={styles.statusPicker}
-                        dropdownIconColor="#3b82f6"
-                      >
-                        <Picker.Item
-                          label={statusConfig[selectedOrder.status].text}
-                          value={selectedOrder.status}
-                          color={statusConfig[selectedOrder.status].color}
-                        />
-                        {Object.entries(statusConfig)
-                          .filter(([key]) => key !== selectedOrder.status)
-                          .map(([key, value]) => (
-                            <Picker.Item
-                              key={key}
-                              label={value.text}
-                              value={key}
-                              color={value.color}
-                            />
-                          ))}
-                      </Picker>
-                    </View>
                   </View>
                 </ScrollView>
                 <View style={styles.detailFooter}>
@@ -432,6 +449,7 @@ export default function OrdersScreen() {
         </View>
       </Modal>
 
+      {/* PAGINATION */}
       {totalPages > 1 && (
         <View style={styles.paginationContainer}>
           <TouchableOpacity
@@ -452,6 +470,7 @@ export default function OrdersScreen() {
         </View>
       )}
 
+      {/* DATE PICKERS */}
       <DateTimePickerModal
         isVisible={showFromPicker}
         mode="date"

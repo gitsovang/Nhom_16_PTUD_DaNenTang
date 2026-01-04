@@ -40,7 +40,7 @@ export default function SellerProfileScreen() {
     products: 0,
     orders: 0,
     revenue: 0,
-    pending: 0,
+    completed: 0,
   });
 
   useEffect(() => {
@@ -63,11 +63,11 @@ export default function SellerProfileScreen() {
         products: Number(res.data.stats?.products ?? 0),
         orders: Number(res.data.stats?.orders ?? 0),
         revenue: Number(res.data.stats?.revenue ?? 0),
-        pending: Number(res.data.stats?.pending ?? 0),
+        completed: Number(res.data.stats?.completed?? 0),
       });
     } catch (error) {
       console.error('Load profile error:', error);
-      setStats({ products: 0, orders: 0, revenue: 0, pending: 0 });
+      setStats({ products: 0, orders: 0, revenue: 0, completed: 0 });
     } finally {
       setLoading(false);
     }
@@ -279,8 +279,8 @@ export default function SellerProfileScreen() {
             <Text style={styles.statLabel}>Doanh thu</Text>
           </View>
           <View style={styles.statCard}>
-            <Text style={styles.statValue}>{stats.pending}</Text>
-            <Text style={styles.statLabel}>Đang xử lý</Text>
+            <Text style={styles.statValue}>{stats.completed}</Text>
+            <Text style={styles.statLabel}>Đã hoàn thành</Text>
           </View>
         </View>
 

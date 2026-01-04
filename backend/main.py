@@ -15,6 +15,9 @@ from werkzeug.utils import secure_filename
 import time
 from datetime import timezone, timedelta
 import pytz
+from collections import defaultdict
+from sqlalchemy import union_all
+from sqlalchemy import column
 
 app = Flask(__name__)
 CORS(app)
@@ -122,8 +125,7 @@ class Order(db.Model):
     buyer_id = db.Column(db.Integer, db.ForeignKey("buyers.id"), nullable=False)
     shopping_address = db.Column(db.String(255), nullable=False)
     total_amount = db.Column(db.Numeric(10, 2), nullable=False)
-    status = db.Column(PgEnum(OrderStatus, name="order_status"), default=OrderStatus.pending)
-    created_at = db.Column(db.DateTime, default=now_vn)  # ← FIXED: Vietnam time
+    created_at = db.Column(db.DateTime, default=now_vn)
 
     items = db.relationship("OrderItem", backref="order", lazy=True)
 
@@ -133,8 +135,18 @@ class OrderItem(db.Model):
     order_id = db.Column(db.Integer, db.ForeignKey("orders.id"), nullable=False)
     product_id = db.Column(db.Integer, db.ForeignKey("products.id"), nullable=False)
     quantity = db.Column(db.Integer, nullable=False)
+    seller_id = db.Column(           
+        db.Integer,
+        db.ForeignKey("sellers.id"),
+        nullable=False
+    )
     unit_price = db.Column(db.Numeric(10, 2), nullable=False)
     subtotal = db.Column(db.Numeric(10, 2), nullable=False)
+    status = db.Column(                 
+        PgEnum(OrderStatus, name="order_item_status"),
+        default=OrderStatus.pending,
+        nullable=False
+    )
 
 class Cart(db.Model):
     __tablename__ = "carts"
@@ -439,22 +451,27 @@ def create_order():
     order = Order(
         buyer_id=buyer_id,
         shopping_address=shopping_address,
-        total_amount=total_amount,
-        status=OrderStatus.pending
+        total_amount=total_amount
     )
     db.session.add(order)
     db.session.flush()
 
     for cart_item in cart.items:
+        product = Product.query.get_or_404(cart_item.product_id)
+
+        if product.stock_quantity < cart_item.quantity:
+            return jsonify({'error': f'Sản phẩm "{product.name}" không đủ tồn kho'}), 400
+
         db.session.add(OrderItem(
             order_id=order.id,
-            product_id=cart_item.product_id,
+            product_id=product.id,
+            seller_id=product.seller_id,
             quantity=cart_item.quantity,
             unit_price=cart_item.unit_price,
-            subtotal=cart_item.subtotal
+            subtotal=cart_item.subtotal,
+            status=OrderStatus.pending
         ))
 
-        product = Product.query.get(cart_item.product_id)
         product.stock_quantity -= cart_item.quantity
 
     db.session.delete(cart)
@@ -466,35 +483,53 @@ def create_order():
     }), 201
 
 
+
 @app.route('/orders', methods=['GET'])
 def get_orders():
     buyer_id = request.args.get('buyer_id', type=int)
     if not buyer_id:
         return jsonify({'error': 'Thiếu buyer_id'}), 400
 
-    orders = Order.query.filter_by(buyer_id=buyer_id)\
-        .order_by(Order.created_at.desc()).all()
-
+    orders = (
+        Order.query
+        .filter_by(buyer_id=buyer_id)
+        .order_by(Order.created_at.desc())
+        .all()
+    )
 
     result = []
     for order in orders:
         for item in order.items:
             product = item.product
-            image_path = product.image_url.split(',')[0].strip() if product.image_url else ''
-            full_image_url = f'http://10.0.2.2:5000{image_path}' if image_path.startswith('/') else image_path
+
+            image_path = (
+                product.image_url.split(',')[0].strip()
+                if product.image_url else ''
+            )
+
+            full_image_url = (
+                f'http://10.0.2.2:5000{image_path}'
+                if image_path.startswith('/')
+                else image_path
+            )
 
             result.append({
                 'order_id': order.id,
-                'name': item.product.name,
+                'order_item_id': item.id,        
+                'product_id': product.id,
+                'name': product.name,
                 'price': float(item.unit_price),
                 'quantity': item.quantity,
-                'image': full_image_url, 
-                'shop': item.product.seller.shop_name,
+                'subtotal': float(item.subtotal),
+                'image': full_image_url,
+                'shop': product.seller.shop_name,
+                'seller_id': item.seller_id,
                 'orderDate': to_vn_date(order.created_at),
-                'status': order.status.value
+                'status': item.status.value      
             })
 
     return jsonify(result), 200
+
 @app.route('/profile/buyer/<int:buyer_id>', methods=['GET', 'PUT'])
 def profile_buyer(buyer_id):
     buyer = Buyer.query.get_or_404(buyer_id)
@@ -549,35 +584,38 @@ def profile_seller(seller_id):
     total_products = Product.query.filter_by(seller_id=seller_id).count()
 
     revenue = (
-        db.session.query(func.sum(Order.total_amount))
-        .join(OrderItem, Order.id == OrderItem.order_id)
-        .join(Product, OrderItem.product_id == Product.id)
-        .filter(Product.seller_id == seller_id)
-        .scalar() or 0
+        db.session.query(func.coalesce(func.sum(OrderItem.subtotal), 0))
+        .filter(
+            OrderItem.seller_id == seller_id,
+            OrderItem.status == OrderStatus.completed
+        )
+        .scalar()
     )
+
 
     total_orders = (
-        db.session.query(func.count(func.distinct(Order.id)))
-        .join(OrderItem, Order.id == OrderItem.order_id)
-        .join(Product, OrderItem.product_id == Product.id)
-        .filter(Product.seller_id == seller_id)
-        .scalar() or 0
+        db.session.query(func.count(OrderItem.id))
+        .filter(OrderItem.seller_id == seller_id)
+        .scalar()
     )
 
-    pending_orders = (
-        db.session.query(func.count(func.distinct(Order.id)))
-        .join(OrderItem, Order.id == OrderItem.order_id)
-        .join(Product, OrderItem.product_id == Product.id)
+    completed_orders = (
+        db.session.query(func.count(OrderItem.id))
         .filter(
-            Product.seller_id == seller_id,
-            Order.status == OrderStatus.pending
+            OrderItem.seller_id == seller_id,
+            OrderItem.status == OrderStatus.completed
         )
-        .scalar() or 0
+        .scalar()
     )
+
 
     avatar_url = ''
     if seller.avatar:
-        avatar_url = f'http://10.0.2.2:5000{seller.avatar}' if seller.avatar.startswith('/') else seller.avatar
+        avatar_url = (
+            f'http://10.0.2.2:5000{seller.avatar}'
+            if seller.avatar.startswith('/')
+            else seller.avatar
+        )
 
     return jsonify({
         'id': seller.id,
@@ -587,10 +625,11 @@ def profile_seller(seller_id):
         'stats': {
             'products': total_products,
             'orders': total_orders,
-            'revenue': float(revenue),
-            'pending': pending_orders
+            'completed': completed_orders,
+            'revenue': float(revenue)
         }
     }), 200
+
 
 
 @app.route('/profile/seller/<int:seller_id>', methods=['POST', 'PUT'])
@@ -638,13 +677,13 @@ def update_seller_profile(seller_id):
 @app.route('/seller/<int:seller_id>/orders', methods=['GET'])
 def seller_orders(seller_id):
     from_date_str = request.args.get('from_date')
-    to_date_str   = request.args.get('to_date')
+    to_date_str = request.args.get('to_date')
 
     query = (
         db.session.query(OrderItem)
-        .join(Order)
-        .join(Product)
-        .filter(Product.seller_id == seller_id)
+        .join(Order, OrderItem.order_id == Order.id)
+        .join(Product, OrderItem.product_id == Product.id)
+        .filter(OrderItem.seller_id == seller_id)
         .options(
             joinedload(OrderItem.order).joinedload(Order.buyer),
             joinedload(OrderItem.product)
@@ -678,8 +717,9 @@ def seller_orders(seller_id):
     for item in items:
         result.append({
             'order_id': item.order.id,
+            'order_item_id': item.id,
             'order_code': f"DH{item.order.id:06d}",
-            'status': item.order.status.value,
+            'status': item.status.value,
             'created_at': to_vn_date(item.order.created_at),
             'seller_subtotal': float(item.subtotal),
             'buyer': {
@@ -695,35 +735,34 @@ def seller_orders(seller_id):
 
     return jsonify(result), 200
 
-
-@app.route('/seller/<int:seller_id>/order/<int:order_id>/status', methods=['PATCH'])
-def update_order_status(seller_id, order_id):
-    order = (
-        db.session.query(Order)
-        .join(OrderItem)
-        .join(Product)
-        .filter(Product.seller_id == seller_id, Order.id == order_id)
-        .first()
-    )
-
-    if not order:
-        return jsonify({'message': 'Không tìm thấy đơn hàng hoặc không thuộc quyền quản lý'}), 404
-
+@app.route('/seller/<int:seller_id>/order-item/<int:order_item_id>/status', methods=['PATCH'])
+def update_order_item_status(seller_id, order_item_id):
     data = request.get_json()
     new_status = data.get('status')
 
     if not new_status:
-        return jsonify({'message': 'Thiếu trường status'}), 400
+        return jsonify({'message': 'Thiếu status'}), 400
 
     try:
-        order.status = OrderStatus(new_status)
+        new_status_enum = OrderStatus(new_status)
     except ValueError:
-        return jsonify({'message': f'Trạng thái không hợp lệ: {new_status}'}), 400
+        return jsonify({'message': 'Status không hợp lệ'}), 400
 
+    order_item = OrderItem.query.filter_by(
+        id=order_item_id,
+        seller_id=seller_id
+    ).first()
+
+    if not order_item:
+        return jsonify({'message': 'Không có quyền cập nhật đơn này'}), 403
+
+    order_item.status = new_status_enum
     db.session.commit()
+
     return jsonify({
         'message': 'Cập nhật trạng thái thành công',
-        'new_status': order.status.value
+        'order_item_id': order_item.id,
+        'status': order_item.status.value
     }), 200
 
 @app.route('/upload', methods=['POST'])
@@ -936,7 +975,6 @@ def dashboard_period_stats():
 
 
 #admin
-
 @app.route('/admin/stats', methods=['GET'])
 def admin_stats():
     start_date_str = request.args.get('start_date')
@@ -944,49 +982,46 @@ def admin_stats():
 
     query_start = datetime.min
     query_end = datetime.max
-
     if start_date_str:
         try:
             query_start = datetime.strptime(start_date_str, '%Y-%m-%d')
         except ValueError:
             pass
-
     if end_date_str:
         try:
             query_end = datetime.strptime(end_date_str, '%Y-%m-%d') + timedelta(days=1)
         except ValueError:
             pass
 
-    gmv = (
-        db.session.query(func.sum(Order.total_amount))
-        .filter(Order.created_at >= query_start, Order.created_at < query_end)
+    gmv = db.session.query(func.coalesce(func.sum(Order.total_amount), 0))\
+        .filter(Order.created_at >= query_start, Order.created_at < query_end)\
         .scalar() or 0
-    )
 
-    dau = (
-        db.session.query(func.count(func.distinct(Buyer.id)))
-        .join(Order, Buyer.id == Order.buyer_id)
+    buyers_active = db.session.query(Order.buyer_id.label('user_id'))\
         .filter(Order.created_at >= query_start, Order.created_at < query_end)
-        .scalar() or 0
-    )
+
+    sellers_active = db.session.query(Product.seller_id.label('user_id'))\
+        .filter(Product.created_at >= query_start, Product.created_at < query_end)
+
+    dau_subq = buyers_active.union_all(sellers_active).subquery()
+    dau = db.session.query(func.count(func.distinct(dau_subq.c.user_id))).scalar() or 0
 
     mau_start = datetime.utcnow() - timedelta(days=30)
-    mau = (
-        db.session.query(func.count(func.distinct(Buyer.id)))
-        .join(Order, Buyer.id == Order.buyer_id)
+    buyers_monthly = db.session.query(Order.buyer_id.label('user_id'))\
         .filter(Order.created_at >= mau_start)
-        .scalar() or 0
-    )
+    sellers_monthly = db.session.query(Product.seller_id.label('user_id'))\
+        .filter(Product.created_at >= mau_start)
 
-    pending_products = (
-        db.session.query(func.count(Product.id))
+    mau_subq = buyers_monthly.union_all(sellers_monthly).subquery()
+    mau = db.session.query(func.count(func.distinct(mau_subq.c.user_id))).scalar() or 0
+
+    pending_products = db.session.query(func.count(Product.id))\
         .filter(
             Product.status == ProductStatus.waiting_for_approve,
             Product.created_at >= query_start,
             Product.created_at < query_end
-        )
+        )\
         .scalar() or 0
-    )
 
     return jsonify({
         'gmv': float(gmv),
@@ -994,7 +1029,6 @@ def admin_stats():
         'mau': int(mau),
         'pending_products': int(pending_products),
     }), 200
-
 
 @app.route('/admin/products', methods=['GET'])
 def admin_products():
